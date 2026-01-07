@@ -5,3 +5,4 @@ pandas
 datasets
 pyarrow<21.0.0
 circuitsvis
+matplotlib
