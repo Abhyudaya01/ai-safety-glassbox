@@ -2,5 +2,6 @@ streamlit
 torch
 transformer_lens
 pandas
-pyarrow<21.0.0
 datasets
+pyarrow<21.0.0
+circuitsvis
