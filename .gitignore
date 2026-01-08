@@ -1,26 +1,8 @@
-# Python caches
+data/raw/
+data/processed/
+
 __pycache__/
 *.pyc
-
-# Env & OS
 .env
 .DS_Store
 .idea/
-
-# Ignore everything in data/ by default...
-data/*
-
-# ...except the cache folder
-!data/cache/
-
-# Inside cache, ignore everything...
-data/cache/*
-
-# ...except the sae folder
-!data/cache/sae/
-
-# Inside sae, ignore everything...
-data/cache/sae/*
-
-# ...except this specific checkpoint
-!data/cache/sae/sae_gpt2_layer6.pt
