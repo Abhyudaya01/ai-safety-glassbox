@@ -1,33 +1,21 @@
 # scripts/explore_feature.py
+
 import os
 import sys
 import argparse
 
-# --- PATH SETUP: make sure we can import from src/ ---
+# --- PATH SETUP ---
 CURRENT_DIR = os.path.dirname(__file__)
 SRC_DIR = os.path.join(CURRENT_DIR, "..", "src")
 sys.path.append(os.path.abspath(SRC_DIR))
-# -----------------------------------------------------
+# ------------------
 
 from glassbox.sae import (
     load_sae,
     default_sae_path,
     get_feature_activations_for_text,
+    load_corpus,
 )
-
-# TODO: replace this with your real corpus later (from a file, dataset, etc.)
-EXAMPLE_PROMPTS = [
-    "I went to Paris and London last summer.",
-    "The Eiffel Tower is a famous landmark in France.",
-    "Berlin is the capital of Germany.",
-    "I wrote some Python code to sort a list.",
-    "JavaScript async/await helps with asynchronous programming.",
-    "She expressed deep love and care for her family.",
-    "New York and Tokyo are large, busy cities.",
-    "I visited Rome and saw many historical monuments.",
-    "The cat slept peacefully on the sofa.",
-    "He refactored his C++ code to improve performance.",
-]
 
 
 def main():
@@ -36,16 +24,26 @@ def main():
     )
     parser.add_argument("--model", type=str, default="gpt2")
     parser.add_argument("--layer", type=int, default=6)
-    parser.add_argument("--feature", type=int, required=True,
-                        help="Feature index (as shown in the dashboard table).")
-    parser.add_argument("--top_k", type=int, default=10,
-                        help="How many top sentences to show.")
+    parser.add_argument(
+        "--feature",
+        type=int,
+        required=True,
+        help="Feature index (as shown in the dashboard table).",
+    )
+    parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
         help="Optional SAE checkpoint path. Defaults to data/cache/sae/sae_<model>_layer<k>.pt",
     )
+    parser.add_argument(
+        "--corpus_path",
+        type=str,
+        default="data/sae_corpus.txt",
+        help="Corpus file (one sentence per line).",
+    )
+
     args = parser.parse_args()
 
     model_name = args.model
@@ -62,9 +60,13 @@ def main():
     print(f"Loading SAE from: {ckpt_path}")
     sae = load_sae(model_name, layer_idx, path=ckpt_path)
 
-    # 2. For each prompt, compute activation of this feature
+    # 2. Load corpus
+    prompts = load_corpus(args.corpus_path)
+    print(f"Loaded {len(prompts)} prompts from {args.corpus_path}")
+
+    # 3. Compute activations for the chosen feature
     results = []
-    for text in EXAMPLE_PROMPTS:
+    for text in prompts:
         vec = get_feature_activations_for_text(text, model_name, layer_idx, sae)
         if feature_idx < 0 or feature_idx >= vec.shape[0]:
             raise ValueError(
@@ -74,10 +76,9 @@ def main():
         score = float(vec[feature_idx].item())
         results.append({"text": text, "activation": score})
 
-    # 3. Sort by activation, descending
+    # 4. Sort and print top-k
     results.sort(key=lambda x: x["activation"], reverse=True)
 
-    # 4. Print top-k sentences
     print()
     print(f"=== Top {top_k} sentences for feature {feature_idx} (layer {layer_idx}) ===")
     for i, row in enumerate(results[:top_k], start=1):

@@ -1,154 +1,257 @@
-# src/glassbox/sae.py
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from .model_loader import ModelWrapper
 
 
+# =========================
+# Paths & Helpers
+# =========================
+
+def default_sae_dir() -> str:
+    """Base directory for SAE checkpoints."""
+    return os.path.join("data", "cache", "sae")
+
+
+def default_sae_path(model_name: str, layer_idx: int) -> str:
+    """Default path for an SAE trained on (model_name, layer_idx)."""
+    fname = f"sae_{model_name}_layer{layer_idx}.pt"
+    return os.path.join(default_sae_dir(), fname)
+
+
+def load_corpus(corpus_path: str) -> List[str]:
+    """Load a simple corpus: one sentence per line."""
+    if not os.path.exists(corpus_path):
+        raise FileNotFoundError(f"Corpus file not found: {corpus_path}")
+    with open(corpus_path, "r", encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+    return lines
+
+
+# =========================
+# Sparse Autoencoder
+# =========================
+
 class SparseAutoencoder(nn.Module):
     """
-    Simple Sparse Autoencoder:
-      encoder: d_model -> d_hidden
-      decoder: d_hidden -> d_model
-      codes:   ReLU + L1 sparsity during training
+    Simple sparse autoencoder:
+      encoder: d_model -> d_hidden (features)
+      decoder: d_hidden -> d_model (reconstruct activations)
+
+    We use ReLU so most features are 0 (sparse).
     """
+
     def __init__(self, d_model: int, d_hidden: int):
         super().__init__()
-        self.encoder = nn.Linear(d_model, d_hidden, bias=True)
-        self.decoder = nn.Linear(d_hidden, d_model, bias=True)
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+
+        self.encoder = nn.Linear(d_model, d_hidden)
+        self.decoder = nn.Linear(d_hidden, d_model)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [batch, d_model]
+        """
+        x: [*, d_model]  activations
+        returns: [*, d_hidden] feature activations (ReLU)
+        """
         return torch.relu(self.encoder(x))
 
     def decode(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        h: [*, d_hidden]
+        returns: [*, d_model]
+        """
         return self.decoder(h)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        x: [*, d_model]
+        returns:
+            recon: [*, d_model]
+            h:     [*, d_hidden]
+        """
         h = self.encode(x)
         recon = self.decode(h)
         return recon, h
 
 
-def _collect_activations(
-    prompts: List[str],
-    model_name: str,
-    layer_idx: int,
-    max_tokens: int = 50_000,
-) -> torch.Tensor:
-    """
-    Run prompts, collect residual stream at one layer, and subsample tokens.
-    Returns [num_tokens, d_model] on CPU.
-    """
-    model = ModelWrapper.load(model_name)
-    hook_name = f"blocks.{layer_idx}.hook_resid_post"
-
-    all_acts = []
-    for text in prompts:
-        _, cache = model.run_with_cache(text, remove_batch_dim=True)
-        layer_act = cache[hook_name]          # [seq_len, d_model]
-        all_acts.append(layer_act.detach())
-
-    acts = torch.cat(all_acts, dim=0)         # [total_tokens, d_model]
-
-    if acts.size(0) > max_tokens:
-        idx = torch.randperm(acts.size(0))[:max_tokens]
-        acts = acts[idx]
-
-    return acts.cpu()
-
+# =========================
+# Training
+# =========================
 
 def train_sae_on_layer(
-    prompts: List[str],
     model_name: str,
     layer_idx: int,
-    d_hidden: int = 4096,
-    batch_size: int = 256,
-    num_epochs: int = 5,
-    lr: float = 1e-3,
-    l1_coef: float = 1e-3,
+    corpus_path: Optional[str] = None,
     max_tokens: int = 50_000,
-    save_dir: str = "data/cache/sae",
-) -> SparseAutoencoder:
+    d_hidden: int = 512,
+    l1_coef: float = 1e-2,
+    epochs: int = 10,
+    batch_size: int = 64,
+    device: Optional[str] = None,
+) -> None:
     """
-    Train a Sparse Autoencoder on residual stream of one transformer layer.
+    Train a sparse autoencoder on residual stream activations at a given layer.
+
+    - model_name: e.g. "gpt2"
+    - layer_idx: which transformer block's resid_post to use
+    - corpus_path: text file, one sentence per line. If None, uses a tiny toy corpus.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    acts = _collect_activations(prompts, model_name, layer_idx, max_tokens=max_tokens)
-    d_model = acts.size(1)
+    print(f"[SAE] Training on model={model_name}, layer={layer_idx}")
 
-    dataset = TensorDataset(acts)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    # 1. Load model
+    print("⬇️ Loading model into RAM...")
+    model = ModelWrapper.load(model_name)
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    print(f"✅ Model {model_name} loaded on {device}.")
 
+    # 2. Load corpus
+    if corpus_path is not None:
+        print(f"[SAE] Loading corpus from: {corpus_path}")
+        prompts = load_corpus(corpus_path)
+    else:
+        print("[SAE] No corpus_path provided; using small built-in toy corpus.")
+        prompts = [
+            "I went to Paris and London last summer.",
+            "The Eiffel Tower is a famous landmark in France.",
+            "Berlin is the capital of Germany.",
+            "I wrote some Python code to sort a list.",
+            "She expressed deep love and care for her family.",
+            "The cat slept peacefully on the sofa.",
+        ]
+
+    # 3. Collect activations up to max_tokens
+    hook_name = f"blocks.{layer_idx}.hook_resid_post"
+    acts_list = []
+    token_count = 0
+
+    for text in prompts:
+        if token_count >= max_tokens:
+            break
+        _, cache = model.run_with_cache(text, remove_batch_dim=True)
+        acts = cache[hook_name]  # [seq_len, d_model]
+        acts = acts.to(device)
+        acts_list.append(acts)
+        token_count += acts.shape[0]
+
+    if not acts_list:
+        raise RuntimeError("No activations collected for SAE training.")
+
+    activations = torch.cat(acts_list, dim=0)  # [total_tokens, d_model]
+    d_model = activations.shape[-1]
+    print(f"[SAE] Collected activations: {activations.shape}, d_model={d_model}")
+
+    # 4. Build SAE
     sae = SparseAutoencoder(d_model=d_model, d_hidden=d_hidden).to(device)
-    opt = torch.optim.Adam(sae.parameters(), lr=lr)
+    optim = torch.optim.Adam(sae.parameters(), lr=1e-3)
 
-    for epoch in range(num_epochs):
+    # 5. Train loop
+    dataset = TensorDataset(activations)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(1, epochs + 1):
         sae.train()
         total_loss = 0.0
 
-        for (batch,) in loader:
+        for (batch,) in dataloader:
             batch = batch.to(device)
             recon, codes = sae(batch)
 
             mse = torch.mean((recon - batch) ** 2)
             l1 = torch.mean(torch.abs(codes))
-
             loss = mse + l1_coef * l1
-            opt.zero_grad()
+
+            optim.zero_grad()
             loss.backward()
-            opt.step()
+            optim.step()
 
             total_loss += loss.item() * batch.size(0)
 
         avg_loss = total_loss / len(dataset)
-        print(f"[SAE layer {layer_idx}] Epoch {epoch+1}/{num_epochs} - Loss {avg_loss:.6f}")
+        print(f"[SAE layer {layer_idx}] Epoch {epoch}/{epochs} - Loss {avg_loss:.6f}")
 
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(
-        save_dir, f"sae_{model_name.replace('/', '_')}_layer{layer_idx}.pt"
-    )
-
+    # 6. Save checkpoint
+    os.makedirs(default_sae_dir(), exist_ok=True)
+    ckpt_path = default_sae_path(model_name, layer_idx)
     torch.save(
         {
             "state_dict": sae.state_dict(),
             "d_model": d_model,
-            "d_hidden": sae.encoder.out_features,
-            "model_name": model_name,
+            "d_hidden": d_hidden,
             "layer_idx": layer_idx,
+            "model_name": model_name,
         },
-        save_path,
+        ckpt_path,
     )
-    print(f"Saved SAE to: {save_path}")
-    return sae
+    print(f"Saved SAE to: {ckpt_path}")
 
 
-def default_sae_path(model_name: str, layer_idx: int, save_dir: str = "data/cache/sae"):
-    return os.path.join(save_dir, f"sae_{model_name.replace('/', '_')}_layer{layer_idx}.pt")
+# =========================
+# Loading & Inference
+# =========================
+
+def _sae_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_sae(model_name: str, layer_idx: int, path: str = None) -> SparseAutoencoder:
+def load_sae(model_name: str, layer_idx: int, path: Optional[str] = None) -> SparseAutoencoder:
     """
-    Load a trained SAE checkpoint for given model + layer.
+    Load a trained SAE checkpoint for (model_name, layer_idx).
     """
     if path is None:
         path = default_sae_path(model_name, layer_idx)
 
-    ckpt = torch.load(path, map_location="cpu")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Could not find SAE checkpoint at {path}. "
+            f"Make sure you trained it (e.g. python -m scripts.train_sae)."
+        )
+
+    ckpt = torch.load(path, map_location=_sae_device())
     d_model = ckpt["d_model"]
     d_hidden = ckpt["d_hidden"]
 
     sae = SparseAutoencoder(d_model=d_model, d_hidden=d_hidden)
     sae.load_state_dict(ckpt["state_dict"])
+    sae.to(_sae_device())
     sae.eval()
     return sae
 
 
+@torch.no_grad()
+def _encode_text_to_features(
+    text: str,
+    model_name: str,
+    layer_idx: int,
+    sae: SparseAutoencoder,
+) -> torch.Tensor:
+    """
+    Helper: run text through model, get layer activations,
+    encode with SAE, max-pool over tokens.
+
+    Returns: [d_hidden] pooled feature activations (on CPU).
+    """
+    model = ModelWrapper.load(model_name)
+    model.to(_sae_device())
+
+    _, cache = model.run_with_cache(text, remove_batch_dim=True)
+    hook_name = f"blocks.{layer_idx}.hook_resid_post"
+    acts = cache[hook_name]  # [seq_len, d_model]
+    acts = acts.to(_sae_device())
+
+    codes = sae.encode(acts)  # [seq_len, d_hidden]
+    pooled, _ = codes.max(dim=0)  # [d_hidden]
+    return pooled.cpu()
+
+
+@torch.no_grad()
 def get_feature_activations_for_text(
     text: str,
     model_name: str,
@@ -156,38 +259,34 @@ def get_feature_activations_for_text(
     sae: SparseAutoencoder,
 ) -> torch.Tensor:
     """
-    For a given text, return a [d_hidden] vector of SAE feature activations
-    (max-pooled over the sequence).
+    Public wrapper: returns [d_hidden] feature activations for a given text.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ModelWrapper.load(model_name)
-
-    _, cache = model.run_with_cache(text, remove_batch_dim=True)
-    hook_name = f"blocks.{layer_idx}.hook_resid_post"
-    acts = cache[hook_name]                   # [seq_len, d_model]
-
-    sae = sae.to(device)
-    with torch.no_grad():
-        codes = sae.encode(acts.to(device))   # [seq_len, d_hidden]
-        pooled, _ = codes.max(dim=0)          # [d_hidden]
-
-    return pooled.cpu()
+    return _encode_text_to_features(text, model_name, layer_idx, sae)
 
 
+@torch.no_grad()
 def get_top_features_for_text(
     text: str,
     model_name: str,
     layer_idx: int,
     sae: SparseAutoencoder,
-    k: int = 20,
-):
+    top_k: int = 20,
+) -> List[dict]:
     """
-    Return list of {feature, activation} for top-k SAE features for this text.
+    Return top-k most active features for a given text as a list of dicts:
+        [{"feature": idx, "activation": value}, ...]
     """
-    vec = get_feature_activations_for_text(text, model_name, layer_idx, sae)
-    values, indices = torch.topk(vec, k=k)
+    pooled = _encode_text_to_features(text, model_name, layer_idx, sae)
+    d_hidden = pooled.shape[0]
+    k = min(top_k, d_hidden)
 
-    return [
-        {"feature": int(idx.item()), "activation": float(val.item())}
-        for idx, val in zip(indices, values)
-    ]
+    values, indices = torch.topk(pooled, k=k)
+    results = []
+    for i in range(k):
+        results.append(
+            {
+                "feature": int(indices[i].item()),
+                "activation": float(values[i].item()),
+            }
+        )
+    return results
