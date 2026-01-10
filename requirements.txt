@@ -3,7 +3,7 @@ torch
 transformers
 transformer_lens
 datasets
-pyarrow>=14.0.0
+pyarrow==14.0.1
 numpy
 pandas
 plotly
