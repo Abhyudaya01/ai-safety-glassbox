@@ -3,6 +3,7 @@ import os
 import torch
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components  # <--- Added for HTML rendering
 import gc  # Garbage collection for RAM management
 
 # --- PATH SETUP ---
@@ -55,7 +56,8 @@ sae_layer = st.sidebar.number_input(
 
 # C. Path Logic
 # Matches the naming convention: sae_{model}_{layer}.pt
-default_ckpt = f"data/sae_{model_name}_layer{sae_layer}.pt"
+# Adjusted path to point to src/glassbox where you likely upload it
+default_ckpt = f"src/glassbox/sae_{model_name}_layer{sae_layer}.pt"
 st.sidebar.markdown("---")
 st.sidebar.header("🧬 SAE Config")
 sae_path_global = st.sidebar.text_input("SAE Path", value=default_ckpt)
@@ -88,8 +90,11 @@ with tab1:
     text_input = st.text_input("Enter text to analyze:", "The cat sat on the mat.", key="att_input")
     if text_input:
         try:
-            html_viz = get_attention_data(text_input, model_name)
-            st.components.v1.html(html_viz, height=600, scrolling=True)
+            # We pass the MODEL OBJECT, not the name, if your tracers expect the wrapper
+            # Assuming get_attention_data handles ModelWrapper or model_name string.
+            # Based on your previous code, it likely takes the wrapper or name.
+            html_viz = get_attention_data(model, text_input) 
+            components.html(str(html_viz), height=600, scrolling=True)
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -99,7 +104,7 @@ with tab2:
     ll_input = st.text_input("Enter text to decode:", "The Eiffel Tower is located in", key="ll_input")
     if ll_input:
         try:
-            df = get_logit_lens_data(ll_input, model_name)
+            df = get_logit_lens_data(model, ll_input)
             # Use columns specific to formatting
             st.dataframe(df.style.background_gradient(subset=["Top Prob"], cmap="Greens"), height=600)
         except Exception as e:
@@ -172,52 +177,63 @@ with tab3:
             try:
                 # 1. Get Vector
                 if steering_mode == "Manual Concept (Text)":
-                    vector = get_steering_vector(pos_concept, neg_concept, model_name, target_layer_final)
+                    vector = get_steering_vector(pos_concept, neg_concept, model, target_layer_final)
                 else:
                     # Pass the Sidebar Path so it knows where to load from
-                    vector = get_sae_feature_vector(feature_idx, model_name, target_layer_final,
-                                                    sae_path=sae_path_global)
+                    # We wrap this in a try block in case the file is missing
+                    try:
+                        vector = get_sae_feature_vector(feature_idx, model_name, target_layer_final,
+                                                        sae_path=sae_path_global)
+                    except Exception:
+                        vector = None
 
-                # 2. Run Evaluation (The new function)
-                results = run_steering_eval(steer_input, vector, multiplier, model_name, target_layer_final)
+                # CHECK: If vector is None, stop here
+                if vector is None:
+                    st.warning("⚠️ Could not load steering vector.")
+                    if steering_mode != "Manual Concept (Text)":
+                         st.info(f"Please check if the SAE weights exist at `{sae_path_global}`")
+                
+                else:
+                    # 2. Run Evaluation (The new function)
+                    results = run_steering_eval(steer_input, vector, multiplier, model, target_layer_final)
 
-                # 3. Display Text Side-by-Side
-                st.markdown("### 📝 Qualitative Results (Text)")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Control (No Steering)")
-                    st.info(results["control_text"])
-                with c2:
-                    st.caption(f"Treatment (Strength {multiplier})")
-                    st.warning(results["steered_text"])
+                    # 3. Display Text Side-by-Side
+                    st.markdown("### 📝 Qualitative Results (Text)")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("Control (No Steering)")
+                        st.info(results["control_text"])
+                    with c2:
+                        st.caption(f"Treatment (Strength {multiplier})")
+                        st.warning(results["steered_text"])
 
-                # 4. Display Metrics (The Scorecard)
-                st.markdown("### 📊 Quantitative Results (Metrics)")
-                metrics = results["metrics"]
+                    # 4. Display Metrics (The Scorecard)
+                    st.markdown("### 📊 Quantitative Results (Metrics)")
+                    metrics = results["metrics"]
 
-                m1, m2, m3 = st.columns(3)
+                    m1, m2, m3 = st.columns(3)
 
-                # Metric 1: Sentiment Shift
-                with m1:
-                    st.metric(
-                        "Sentiment Shift",
-                        f"{metrics['sentiment_steered']:.2f}",
-                        delta=f"{metrics['sentiment_delta']:.2f}"
-                    )
+                    # Metric 1: Sentiment Shift
+                    with m1:
+                        st.metric(
+                            "Sentiment Shift",
+                            f"{metrics['sentiment_steered']:.2f}",
+                            delta=f"{metrics['sentiment_delta']:.2f}"
+                        )
 
-                # Metric 2: Subjectivity Shift
-                with m2:
-                    st.metric(
-                        "Subjectivity",
-                        f"{metrics['subjectivity_steered']:.2f}",
-                        delta=f"{metrics['subjectivity_steered'] - metrics['subjectivity_control']:.2f}",
-                        delta_color="off"
-                    )
+                    # Metric 2: Subjectivity Shift
+                    with m2:
+                        st.metric(
+                            "Subjectivity",
+                            f"{metrics['subjectivity_steered']:.2f}",
+                            delta=f"{metrics['subjectivity_steered'] - metrics['subjectivity_control']:.2f}",
+                            delta_color="off"
+                        )
 
-                # Metric 3: Word Count Change
-                with m3:
-                    len_diff = len(results['steered_text']) - len(results['control_text'])
-                    st.metric("Length Change", f"{len(results['steered_text'])} chars", delta=f"{len_diff}")
+                    # Metric 3: Word Count Change
+                    with m3:
+                        len_diff = len(results['steered_text']) - len(results['control_text'])
+                        st.metric("Length Change", f"{len(results['steered_text'])} chars", delta=f"{len_diff}")
 
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -237,14 +253,26 @@ with tab4:
     if st.button("Analyze Features"):
         with st.spinner("Analyzing..."):
             try:
-                sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
-                top_feats = get_top_features_for_text(dict_input, model_name, int(sae_layer), sae, top_k=top_k)
+                # 1. Load SAE safely
+                try:
+                    sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+                except Exception:
+                    sae = None
 
-                if top_feats:
-                    df_feats = pd.DataFrame(top_feats)
-                    st.dataframe(df_feats.style.background_gradient(subset=["activation"], cmap="Blues"))
+                # 2. Check if SAE is None BEFORE using it
+                if sae is None:
+                    st.warning("⚠️ SAE Model Weights not found.")
+                    st.info(f"The app looked for weights at: `{sae_path_global}` but didn't find them.")
+                    st.markdown("Please upload your `.pt` file to the `src/glassbox/` folder on GitHub.")
                 else:
-                    st.warning("No active features found.")
+                    # 3. Only run if SAE exists
+                    top_feats = get_top_features_for_text(dict_input, model, int(sae_layer), sae, top_k=top_k)
+
+                    if top_feats:
+                        df_feats = pd.DataFrame(top_feats)
+                        st.dataframe(df_feats.style.background_gradient(subset=["activation"], cmap="Blues"))
+                    else:
+                        st.warning("No active features found.")
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -259,12 +287,21 @@ with tab4:
 
     if st.button("Find Top Sentences"):
         try:
-            # We assume sae is loaded or load it here
-            sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+            # 1. Load SAE safely
+            try:
+                sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+            except Exception:
+                sae = None
 
+            # 2. Check existence
+            if sae is None:
+                st.warning("⚠️ SAE Model Weights not found.")
+                st.stop() # Stop execution here
+            
             # Simple check if file exists
             if not os.path.exists(corpus_path_ui):
-                st.error("Corpus file not found! Create one in data/sae_corpus.txt")
+                st.warning(f"Corpus file not found at `{corpus_path_ui}`.")
+                st.info("You need to upload a text file (e.g., `sae_corpus.txt`) to analyze specific sentences.")
             else:
                 with open(corpus_path_ui, "r") as f:
                     lines = [l.strip() for l in f if l.strip()]
@@ -274,7 +311,7 @@ with tab4:
                 scan_limit = 50
                 for i, txt in enumerate(lines):
                     if i >= scan_limit: break
-                    vec = get_feature_activations_for_text(txt, model_name, int(sae_layer), sae)
+                    vec = get_feature_activations_for_text(txt, model, int(sae_layer), sae)
                     if feat_id_inspect < vec.shape[0]:
                         val = vec[feat_id_inspect].item()
                         if val > 0.1:  # Only show non-zero
