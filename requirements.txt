@@ -2,9 +2,7 @@ streamlit
 torch
 transformers
 transformer_lens
-# Pinning these two is the key fix
-datasets==2.19.0
-pyarrow==15.0.0
+datasets
 numpy
 pandas
 plotly
