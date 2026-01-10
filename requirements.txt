@@ -1,6 +1,7 @@
 streamlit
 torch
 transformers
+transformer_lens
 numpy
 pandas
 plotly
