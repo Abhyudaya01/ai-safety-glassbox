@@ -57,7 +57,7 @@ sae_layer = st.sidebar.number_input(
 # C. Path Logic
 # Matches the naming convention: sae_{model}_{layer}.pt
 # Adjusted path to point to src/glassbox where you likely upload it
-default_ckpt = f"src/glassbox/sae_{model_name}_layer{sae_layer}.pt"
+default_ckpt = f"data/cache/sae/sae_{model_name}_layer{sae_layer}.pt"
 st.sidebar.markdown("---")
 st.sidebar.header("🧬 SAE Config")
 sae_path_global = st.sidebar.text_input("SAE Path", value=default_ckpt)
