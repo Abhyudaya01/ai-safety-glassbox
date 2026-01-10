@@ -12,3 +12,7 @@ tqdm
 einops
 accelerate
 circuitsvis
+textblob
+nltk
+matplotlib
+sentencepiece
