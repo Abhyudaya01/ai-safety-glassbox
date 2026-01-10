@@ -223,30 +223,31 @@ with tab3:
                 st.error(f"Error: {e}")
 
 # --- TAB 4: FEATURE DICTIONARY ---
+# --- TAB 4: FEATURE DICTIONARY ---
 with tab4:
-    st.subheader("🧬 Feature Dictionary")
-    st.markdown(f"Inspecting SAE at **Layer {sae_layer}** (Change in Sidebar)")
+    st.header("Sparse Autoencoder Features")
+    
+    # 1. Load the SAE safely
+    try:
+        # Try to load, but prepare for it to fail if file is missing
+        sae = load_sae(model_name, int(sae_layer), path=sae_path_global) 
+    except Exception:
+        sae = None
 
-    dict_input = st.text_input(
-        "Text to analyze:",
-        "I went to Paris and London and wrote some Python code.",
-        key="dict_input",
-    )
-    top_k = st.slider("Top-K features", 5, 50, 20)
-
-    if st.button("Analyze Features"):
-        with st.spinner("Analyzing..."):
-            try:
-                sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
-                top_feats = get_top_features_for_text(dict_input, model_name, int(sae_layer), sae, top_k=top_k)
-
-                if top_feats:
-                    df_feats = pd.DataFrame(top_feats)
-                    st.dataframe(df_feats.style.background_gradient(subset=["activation"], cmap="Blues"))
-                else:
-                    st.warning("No active features found.")
-            except Exception as e:
-                st.error(f"Error: {e}")
+    # 2. THE FIX: Check if it exists before using it
+    if sae is None:
+        # If missing, show a warning instead of crashing
+        st.warning("⚠️ SAE Model not found.")
+        st.info(f"Could not find weights at: `{sae_path_global}`. Please upload the .pt file to src/glassbox/.")
+    
+    else:
+        # 3. Only run this code if 'sae' is real
+        text_input = st.text_input("Enter text:", "The Eiffel Tower is in Paris")
+        
+        if st.button("Analyze"):
+            # This line was crashing before because sae was None!
+            top_feats = get_top_features_for_text(text_input, model, int(sae_layer), sae)
+            st.write(top_feats)
 
     st.markdown("---")
     st.markdown("#### 🔍 Inspect Corpus")
