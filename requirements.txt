@@ -11,3 +11,4 @@ scikit-learn
 tqdm
 einops
 accelerate
+circuitsvis
