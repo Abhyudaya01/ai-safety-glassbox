@@ -2,6 +2,8 @@ streamlit
 torch
 transformers
 transformer_lens
+datasets
+pyarrow>=14.0.0
 numpy
 pandas
 plotly
