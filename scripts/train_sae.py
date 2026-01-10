@@ -1,54 +1,76 @@
-# scripts/train_sae.py
-
-import os
 import sys
+import os
+import torch
 import argparse
+from datasets import load_dataset
 
-# --- PATH SETUP ---
-CURRENT_DIR = os.path.dirname(__file__)
-SRC_DIR = os.path.join(CURRENT_DIR, "..", "src")
-sys.path.append(os.path.abspath(SRC_DIR))
-# ------------------
+# Path setup
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from glassbox.sae import train_sae_on_layer
+from glassbox.model_loader import ModelWrapper
+from glassbox.sae import SparseAutoencoder, get_activations, train_step
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Train a Sparse Autoencoder on GPT-2 layer activations."
-    )
-    parser.add_argument("--model", type=str, default="gpt2")
-    parser.add_argument("--layer", type=int, default=6)
-    parser.add_argument(
-        "--corpus_path",
-        type=str,
-        default="data/sae_corpus.txt",
-        help="Text file with one sentence per line for SAE training.",
-    )
-    parser.add_argument("--hidden", type=int, default=512, help="SAE hidden size (number of features).")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument(
-        "--l1",
-        type=float,
-        default=1e-2,
-        help="L1 coefficient for sparsity (higher -> more sparse).",
-    )
-    parser.add_argument("--max_tokens", type=int, default=50_000)
-    parser.add_argument("--batch_size", type=int, default=64)
+def train_sae(model_name="gpt2", layer_idx=6, n_steps=5000):
+    """
+    Trains an SAE for a specific model and layer using WikiText data.
+    """
+    # 1. Load the specific model
+    print(f"🧠 Loading {model_name}...")
+    model = ModelWrapper.load(model_name)
 
-    args = parser.parse_args()
+    # --- FIX: DETECT DEVICE (MPS/CUDA/CPU) ---
+    # We need to ensure the SAE lives on the same chip as the main model
+    device = model.cfg.device
+    print(f"⚙️  Model is running on device: {device}")
+    # -----------------------------------------
 
-    train_sae_on_layer(
-        model_name=args.model,
-        layer_idx=args.layer,
-        corpus_path=args.corpus_path,
-        max_tokens=args.max_tokens,
-        d_hidden=args.hidden,
-        l1_coef=args.l1,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-    )
+    # 2. Setup SAE
+    d_model = model.cfg.d_model
+    sae = SparseAutoencoder(input_dim=d_model, hidden_dim=d_model * 8)
+
+    # --- FIX: MOVE SAE TO GPU ---
+    sae = sae.to(device)
+    # ----------------------------
+
+    optimizer = torch.optim.Adam(sae.parameters(), lr=3e-4)
+
+    # --- REAL DATA LOADING ---
+    print("📚 Loading WikiText-2 dataset (Real English Text)...")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    real_text_data = [row['text'] for row in dataset if len(row['text']) > 50]
+    print(f"✅ Loaded {len(real_text_data)} real paragraphs for training.")
+    # -------------------------
+
+    # 3. Training Loop
+    print(f"🚀 Training on {model_name} Layer {layer_idx} (d_model={d_model})...")
+
+    for i in range(n_steps):
+        txt = real_text_data[i % len(real_text_data)]
+        if len(txt) > 1000:
+            txt = txt[:1000]
+
+        # acts will be on the correct device (MPS/GPU) automatically
+        acts = get_activations(txt, model, layer_idx)
+
+        loss = train_step(sae, acts, optimizer)
+
+        if i % 100 == 0:
+            print(f"Step {i}: Loss {loss.item():.4f}")
+
+    # 4. Save
+    os.makedirs("data", exist_ok=True)
+    save_path = f"data/sae_{model_name}_layer{layer_idx}.pt"
+    torch.save(sae.state_dict(), save_path)
+    print(f"✅ Saved SAE to {save_path}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt2", help="gpt2, gpt2-medium, or gpt2-large")
+    parser.add_argument("--layer", type=int, default=6, help="Layer index")
+    parser.add_argument("--steps", type=int, default=2000, help="Training steps")
+
+    args = parser.parse_args()
+
+    train_sae(model_name=args.model, layer_idx=args.layer, n_steps=args.steps)
