@@ -1,8 +1,38 @@
+# --- Project Specific Data ---
 data/raw/
 data/processed/
+# Specific to your SAE project (prevents uploading large dictionaries)
+data/sae_weights/
 
+# --- Model Weights (CRITICAL for AI projects) ---
+# Prevent pushing massive model files (GitHub has a 100MB limit)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.h5
+*.onnx
+
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+
+# --- Virtual Environments ---
+# You never want to push your installed libraries
+venv/
+.venv/
+env/
+
+# --- Environment Variables & Secrets ---
+# NEVER commit these
 .env
-.DS_Store
+.streamlit/secrets.toml
+
+# --- IDEs & OS ---
 .idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
