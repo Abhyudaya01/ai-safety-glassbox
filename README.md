@@ -1,114 +1,96 @@
-# Glass Box AI – LLM Interpretability & Activation Steering Dashboard
+# 🧠 Glass Box AI: LLM Interpretability & Steering
 
-This project is a **hands-on interpretability lab for GPT-2**.  
-It lets you inspect what a transformer is doing inside its layers, steer its internal activations, and discover **interpretable features** using a **Sparse Autoencoder (SAE)**.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B.svg)](https://streamlit.io/)
+[![TransformerLens](https://img.shields.io/badge/Library-TransformerLens-orange.svg)](https://github.com/neelnanda-io/TransformerLens)
+[![Status](https://img.shields.io/badge/Status-Live_Deployment-green.svg)]()
 
-Built with:
+> **"Don't just read the output. Read the mind."**
 
-- **Python, PyTorch**
-- **[TransformerLens](https://github.com/neelnanda-io/TransformerLens)** for hookable GPT-2
-- **Streamlit** for an interactive dashboard
-- **Sparse Autoencoder (SAE)** for concept discovery
+## 📋 Overview
+**Glass Box AI** is a full-stack interpretability lab for GPT-2. It allows researchers to visualize internal model states, discover interpretable features using **Sparse Autoencoders (SAE)**, and perform **Activation Steering** to manipulate model behavior in real-time.
 
-> Deployed as a public Streamlit app so interviewers can explore **attention, logit lens, activation steering, and learned concepts** directly in the browser.
+Unlike standard LLM interfaces, this tool hooks into the residual stream to expose *how* the model thinks, not just what it says.
 
----
-
-## 🔍 High-level Overview
-
-The project is organized into “phases” that map directly to the code:
-
-1. **Phase 1 – Interpretability Engine (`glassbox/`)**
-   - Load GPT-2 with hooks.
-   - Inspect attention patterns and layer-wise token predictions (logit lens).
-
-2. **Phase 2 – Activation Steering (`glassbox/steering.py`, dashboard tab)**
-   - Compute **steering vectors** from text pairs (e.g., `"Love"` – `"Hate"`).
-   - Inject these vectors into a chosen residual stream layer during generation.
-   - See how the model’s **tone** and behavior change while factual answers stay intact.
-
-3. **Phase 3 – Feature Dictionary with Sparse Autoencoder (`glassbox/sae.py`)**
-   - Train a **Sparse Autoencoder (SAE)** on mid-layer GPT-2 activations.
-   - Turn raw 768-dim activations into **512 sparse features**.
-   - Explore which features fire for a given text, and which texts activate a given feature.
-   - Effectively treat the layer as a **dictionary of concepts** instead of a black box.
-
-Planned later phases (e.g., MCP server, embedded deployment) are scaffolded but optional.
+**🔗 [View Live Dashboard](https://ai-safety-glassbox-ffpfd7caqoxnrnalcyddnb.streamlit.app/)**
 
 ---
 
-## 🧠 Dashboard Features
+## 🚀 Key Features (The "Phases")
 
-The main UI lives in `src/dashboard/app.py` and is served via Streamlit.
+### 1. 🧐 Logit Lens (Mind Reading)
+* **The Logic:** Decodes the residual stream at every layer to see the model's "subconscious" predictions.
+* **The Insight:** Watch concepts like "Paris" emerge in Layer 15, well before the final output generation.
+* **Tech:** `glassbox/tracers.py`
 
-### 1. 🔥 Attention Maps
+### 2. 🎮 Activation Steering (Behavioral Control)
+* **The Logic:** We inject a "steering vector" (calculated from concept pairs like `Love - Hate`) directly into the residual stream during inference.
+* **The Result:** We can force the model to be "happier," "angrier," or "more factual" without retraining a single weight.
+* **Tech:** `glassbox/steering.py`
 
-**Tab:** “Attention Maps”  
-**Code:** `glassbox/tracers.py`, `glassbox/visualizers.py`
-
-- Enter any text and visualize **which tokens attend to which** via CircuitsVis.
-- Helps answer questions like:
-  - “Which word is the model focusing on when predicting the next token?”
-  - “Are there heads that specialize in syntax vs. long-range dependencies?”
-
----
-
-### 2. 🧐 Logit Lens
-
-**Tab:** “Logit Lens”  
-**Code:** `glassbox/tracers.py`
-
-- Enter a prefix like:  
-  > `"The capital of France is"`
-- For each layer, decode the residual stream and show:
-  - **Top predicted token**
-  - **Probability**
-- You can watch “Paris” emerge as the top candidate layer-by-layer.
-- Useful for seeing **where factual knowledge appears** in the network.
+### 3. 🧬 Dictionary Learning (Sparse Autoencoders)
+* **The Logic:** Neural networks process information in "superposition" (dense, polysemantic vectors).
+* **The Solution:** Trained a **Sparse Autoencoder (SAE)** on Layer 6 activations to decompose these dense vectors into **512 human-interpretable features**.
+* **Tech:** `glassbox/sae.py`
 
 ---
 
-### 3. 🎮 Activation Steering (Concept Injection)
+## 🛠️ Tech Stack
 
-**Tab:** “Activation Steering”  
-**Code:** `glassbox/steering.py`
-
-- Define a **concept pair**, e.g.:
-  - Positive (+): `"Love"`
-  - Negative (−): `"Hate"`
-- Compute a steering vector:  
-  > `v = activations("Love") – activations("Hate")`
-- During generation, inject `multiplier * v` into a chosen layer’s residual stream.
-- Run A/B experiments:
-  - **Control:** baseline GPT-2
-  - **Intervention:** GPT-2 + steering vector
-- Example use:
-  - For the prompt `"I hate you because"`, a strong positive `"Love"` steering can push the model to **refuse toxic completions** and shift toward more positive / safe responses.
-- Shows how we can **change tone and sentiment** without changing underlying facts (e.g., “the capital of France is Paris”).
+* **Core Model:** `GPT-2 Small/Medium`
+* **Interpretability Lib:** `TransformerLens` (Hook points & caching)
+* **Frontend:** `Streamlit` (Real-time visualization)
+* **Math:** `PyTorch`, `Einops` (Tensor manipulation)
+* **Visualization:** `CircuitsVis`, `Plotly`
 
 ---
 
-### 4. 🧬 Phase 3 – Sparse Autoencoder Feature Dictionary
+## 🧪 Featured Experiment: "The Rome Inception"
 
-**Tab:** “Feature Dictionary”  
-**Code:** `glassbox/sae.py`, `scripts/train_sae.py`, `scripts/explore_feature.py`
+One of the core validation tests for this dashboard was **Concept Replacement**.
 
-This is the **“dictionary of concepts”** phase.
+* **Goal:** Force GPT-2 (which knows the Eiffel Tower is in Paris) to believe it is in **Rome**.
+* **Method:** We intercept the forward pass at **Layer 10** and inject the vector `(Rome - Paris)`.
+* **Result:**
+    > *Control:* "The Eiffel Tower is located in **Paris**."
+    >
+    > *Steered:* "The Eiffel Tower is located in **Rome**, in the city of Rome..."
 
-#### Training the SAE
+---
 
-1. Collect activations from GPT-2 at **layer 6**:
-   - Hook: `blocks.6.hook_resid_post`
-   - Corpus: `data/sae_corpus.txt` (one sentence per line)
-2. Train a Sparse Autoencoder:
-   - Encoder: **768 → 512** features
-   - Decoder: **512 → 768**
-   - Loss = reconstruction (MSE) + **L1 sparsity** on the feature activations.
-3. L1 sparsity encourages **most features to be OFF** for a given token:
-   - Only a small subset of features fire strongly.
-   - That makes those features **more interpretable**.
+## 💻 Installation & Usage
 
-Command to train:
-
+### 1. Setup
 ```bash
-python -m scripts.train_sae --model gpt2 --layer 6 --corpus_path data/sae_corpus.txt --hidden 512 --epochs 10 --l1 1e-2
+git clone https://github.com/Abhyudaya01/ai-safety-glassbox.git
+cd ai-safety-glassbox
+pip install -r requirements.txt
+
+-->Run the Dashboard
+
+python -m streamlit run src/dashboard/app.py
+
+-->Train the Sparse Autoencoder (SAE)
+
+python -m scripts.train_sae \
+  --model gpt2 \
+  --layer 6 \
+  --corpus_path data/sae_corpus.txt \
+  --hidden 512 \
+  --epochs 10 \
+  --l1 1e-2
+
+-->Repo Structure
+
+glass-box-ai/
+├── glassbox/               # Core Interpretability Engine
+│   ├── tracers.py          # Logit Lens & Attention Hooks
+│   ├── steering.py         # Vector Arithmetic Logic
+│   └── sae.py              # Sparse Autoencoder Architecture
+├── src/
+│   └── dashboard/          # Streamlit UI Components
+│       └── app.py          # Main Application Entry
+├── scripts/                # Training Scripts
+│   └── train_sae.py        # SAE Training Loop
+├── data/                   # Activations & Model Weights
+└── requirements.txt        # Dependencies

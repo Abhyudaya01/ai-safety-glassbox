@@ -1,22 +1,25 @@
 import sys
 import os
+from dotenv import load_dotenv  # <--- ADD THIS
+
+load_dotenv()
 import torch
 import pandas as pd
 import streamlit as st
 import gc  # Garbage collection for RAM management
 
 # --- PATH SETUP ---
-# Ensure we can import from src/glassbox
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
-# ------------------
 
 from dashboard.components import header
 from glassbox.model_loader import ModelWrapper
+
+# --- TRACERS ---
 from glassbox.tracers import get_attention_data, get_logit_lens_data
-from glassbox.steering import get_steering_vector, generate_steered_response
-from glassbox.evaluate import run_steering_eval
+from glassbox.steering import get_steering_vector, run_steering_eval
+
 from glassbox.sae import (
     load_sae,
     get_top_features_for_text,
@@ -24,60 +27,97 @@ from glassbox.sae import (
     get_sae_feature_vector
 )
 
-# 1. Page Config
-st.set_page_config(page_title="Glass Box AI", layout="wide", page_icon="🧠")
 
-# 2. Header
+# --- HELPER FUNCTION: ROBUST FEATURE SEARCH (Algorithm v7) ---
+def find_best_feature(text, model, sae, layer_name, top_k=5):
+    """
+    Algorithm v7: Ratio Filtering (Target / Neutral).
+    """
+    neutral_text = "The wall is made of concrete and stone."
+
+    with torch.no_grad():
+        _, cache_target = model.run_with_cache(text)
+        _, cache_neutral = model.run_with_cache(neutral_text)
+
+    hook_point = f"blocks.{layer_name}.hook_resid_pre"
+    if hook_point not in cache_target:
+        return []
+
+    # Get SAE Activations
+    act_target = sae(cache_target[hook_point])
+    if isinstance(act_target, tuple): act_target = act_target[0]
+    act_target = act_target.squeeze(0).max(dim=0).values
+
+    act_neutral = sae(cache_neutral[hook_point])
+    if isinstance(act_neutral, tuple): act_neutral = act_neutral[0]
+    act_neutral = act_neutral.squeeze(0).max(dim=0).values
+
+    # Ratio Filter
+    specificity_ratio = act_target / (act_neutral + 0.1)
+    valid_mask = (specificity_ratio > 3.0) & (act_target > 1.0)
+    final_scores = torch.where(valid_mask, act_target, torch.tensor(-1.0, device=act_target.device))
+
+    top_vals, top_indices = torch.topk(final_scores, k=min(top_k * 5, final_scores.shape[0]))
+
+    results = []
+    found_count = 0
+
+    for i in range(len(top_indices)):
+        if found_count >= top_k: break
+        idx = top_indices[i].item()
+        score = top_vals[i].item()
+
+        if score < 0: continue
+
+        noise_level = act_neutral[idx].item()
+        results.append({
+            "Rank": found_count + 1,
+            "Feature ID": idx,
+            "Activation": score,
+            "Noise Level": noise_level,
+            "Ratio": score / (noise_level + 0.01)
+        })
+        found_count += 1
+
+    return results
+
+
+# ------------------------------------------
+# MAIN UI SETUP
+# ------------------------------------------
+
+st.set_page_config(page_title="Glass Box AI", layout="wide", page_icon="🧠")
 header()
 
-# --- SIDEBAR: GLOBAL CONFIGURATION ---
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Model Settings")
-
-# A. Model Selector (Supports Small, Medium, Large)
-model_options = {
-    "gpt2": 12,  # Small (124M)
-    "gpt2-medium": 24,  # Medium (355M)
-    "gpt2-large": 36,  # Large (774M)
-}
-# Default to gpt2-medium if available
+model_options = {"gpt2": 12, "gpt2-medium": 24, "gpt2-large": 36}
 model_name = st.sidebar.selectbox("Select Model", list(model_options.keys()), index=0)
 
-# B. Dynamic Layer Slider
-# The slider max value updates based on the model choice
 max_layers = model_options[model_name]
-sae_layer = st.sidebar.number_input(
-    "SAE Layer",
-    min_value=0,
-    max_value=max_layers - 1,
-    value=int(max_layers / 2),  # Defaults to middle layer
-    help=f"Select a layer between 0 and {max_layers - 1}"
-)
+sae_layer = st.sidebar.number_input("SAE Layer", 0, max_layers - 1, int(max_layers / 2))
 
-# C. Path Logic
-# Matches the naming convention: sae_{model}_{layer}.pt
 default_ckpt = f"data/sae_{model_name}_layer{sae_layer}.pt"
 st.sidebar.markdown("---")
-st.sidebar.header("🧬 SAE Config")
 sae_path_global = st.sidebar.text_input("SAE Path", value=default_ckpt)
 
-# D. Model Loading with RAM Management
-# We check if the model changed to avoid reloading it unnecessarily
 if "model" not in st.session_state or st.session_state.get("model_name") != model_name:
-    with st.spinner(f"🧠 Loading {model_name}... (Please wait)"):
-        # 1. Clear RAM if switching models
-        if "model" in st.session_state:
-            del st.session_state.model
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            gc.collect()
+    with st.spinner(f"🧠 Loading {model_name}..."):
+        try:
+            if "model" in st.session_state:
+                del st.session_state.model
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                gc.collect()
+            st.session_state.model = ModelWrapper.load(model_name)
+            st.session_state.model_name = model_name
+        except Exception as e:
+            st.error(f"Could not load {model_name}: {e}")
+            st.info("Make sure you are connected to the internet for the first run, or that the model is already cached locally by Hugging Face.")
+            st.stop()
 
-        # 2. Load New Model
-        st.session_state.model = ModelWrapper.load(model_name)
-        st.session_state.model_name = model_name
-
-# Create a local reference for easier use
 model = st.session_state.model
 
-# 3. Main Tabs
+# --- TABS ---
 tab1, tab2, tab3, tab4 = st.tabs(
     ["🔥 Attention Maps", "🧐 Logit Lens", "🎮 Activation Steering", "🧬 Feature Dictionary"]
 )
@@ -100,7 +140,6 @@ with tab2:
     if ll_input:
         try:
             df = get_logit_lens_data(ll_input, model_name)
-            # Use columns specific to formatting
             st.dataframe(df.style.background_gradient(subset=["Top Prob"], cmap="Greens"), height=600)
         except Exception as e:
             st.error(f"Error: {e}")
@@ -108,183 +147,182 @@ with tab2:
 # --- TAB 3: STEERING ---
 with tab3:
     st.subheader("🎮 Surgical Activation Steering")
-    st.markdown("Intervene on the model using raw concepts or discovered SAE features.")
 
-    # Steering Mode Selection
-    steering_mode = st.radio(
-        "Steering Source:",
-        ["Manual Concept (Text)", "Discovered Feature (SAE)"],
-        horizontal=True
-    )
+    col_setup, col_params = st.columns([1, 1])
 
-    vector = None
-    target_layer_final = sae_layer  # Default to SAE layer
-
-    # MODE A: MANUAL
-    if steering_mode == "Manual Concept (Text)":
-        col1, col2 = st.columns(2)
-        with col1:
-            pos_concept = st.text_input("Positive Concept (+)", "Love")
-            neg_concept = st.text_input("Negative Concept (-)", "Hate")
-        with col2:
-            # Here we can choose ANY layer
-            manual_layer = st.number_input(
-                "Injection Layer",
-                0, model.cfg.n_layers - 1,
-                int(sae_layer),
-                key="steer_layer_manual"
-            )
-            multiplier = st.slider("Strength", -10.0, 10.0, 0.0, 0.5, key="steer_mult_manual")
-            target_layer_final = int(manual_layer)
-
-    # MODE B: SAE FEATURE
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            feature_idx = st.number_input(
-                "SAE Feature Index",
-                min_value=0,
-                value=0,  # Default 0, change to 334 etc.
-                help="Enter the ID of a feature you found in the Dictionary tab."
-            )
-        with col2:
-            # Here we MUST use the SAE layer from the sidebar
-            st.info(f"Steering on Layer {sae_layer} (Defined in Sidebar)")
-
-            # --- FIX: INCREASED RANGE TO +/- 1000.0 ---
-            multiplier = st.slider(
-                "Clamping Strength",
-                min_value=-1000.0,
-                max_value=1000.0,
-                value=0.0,
-                step=10.0,
-                key="steer_mult_sae"
-            )
-            # ------------------------------------------
-
+    with col_setup:
+        steering_mode = st.radio("Source", ["Manual (Text)", "SAE Feature"], horizontal=True)
+        if steering_mode == "Manual (Text)":
+            pos = st.text_input("Positive Concept", "Love")
+            neg = st.text_input("Negative Concept", "Hate")
+            steer_layer = st.number_input("Layer", 0, model.cfg.n_layers - 1, int(sae_layer))
+            target_layer_final = int(steer_layer)
+        else:
+            default_feat = st.session_state.get('feature_idx', 0)
+            feat_idx = st.number_input("Feature ID", 0, value=default_feat, key="steer_feat_id")
+            st.caption(f"Steering on Layer {sae_layer}")
             target_layer_final = int(sae_layer)
 
-    st.markdown("---")
-    steer_input = st.text_input("Prompt to Steer:", "I am going to the store to buy")
+    with col_params:
+        mult = st.slider("Strength", -10.0, 10.0, 5.0, key="steer_mult")
 
-    if st.button("🔴 Run Experiment & Evaluate"):
-        with st.spinner("Running A/B Test..."):
+    steer_prompt = st.text_input("Prompt:", "I am going to the store to buy")
+
+    if st.button("🔴 Run Experiment"):
+        with st.spinner("Steering..."):
             try:
-                # 1. Get Vector
-                if steering_mode == "Manual Concept (Text)":
-                    vector = get_steering_vector(pos_concept, neg_concept, model_name, target_layer_final)
+                if steering_mode == "Manual (Text)":
+                    vec = get_steering_vector(pos, neg, model_name, target_layer_final)
                 else:
-                    # Pass the Sidebar Path so it knows where to load from
-                    vector = get_sae_feature_vector(feature_idx, model_name, target_layer_final,
-                                                    sae_path=sae_path_global)
+                    vec = get_sae_feature_vector(feat_idx, model_name, target_layer_final, sae_path=sae_path_global)
 
-                # 2. Run Evaluation (The new function)
-                results = run_steering_eval(steer_input, vector, multiplier, model_name, target_layer_final)
+                if vec is None:
+                    st.error("Could not load the requested SAE feature vector. Check the SAE path, layer, model, and feature ID.")
+                    st.stop()
 
-                # 3. Display Text Side-by-Side
-                st.markdown("### 📝 Qualitative Results (Text)")
+                res = run_steering_eval(steer_prompt, vec, mult, model_name, target_layer_final)
+
                 c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Control (No Steering)")
-                    st.info(results["control_text"])
-                with c2:
-                    st.caption(f"Treatment (Strength {multiplier})")
-                    st.warning(results["steered_text"])
-
-                # 4. Display Metrics (The Scorecard)
-                st.markdown("### 📊 Quantitative Results (Metrics)")
-                metrics = results["metrics"]
-
-                m1, m2, m3 = st.columns(3)
-
-                # Metric 1: Sentiment Shift
-                with m1:
-                    st.metric(
-                        "Sentiment Shift",
-                        f"{metrics['sentiment_steered']:.2f}",
-                        delta=f"{metrics['sentiment_delta']:.2f}"
-                    )
-
-                # Metric 2: Subjectivity Shift
-                with m2:
-                    st.metric(
-                        "Subjectivity",
-                        f"{metrics['subjectivity_steered']:.2f}",
-                        delta=f"{metrics['subjectivity_steered'] - metrics['subjectivity_control']:.2f}",
-                        delta_color="off"
-                    )
-
-                # Metric 3: Word Count Change
-                with m3:
-                    len_diff = len(results['steered_text']) - len(results['control_text'])
-                    st.metric("Length Change", f"{len(results['steered_text'])} chars", delta=f"{len_diff}")
-
+                c1.info(f"**Original:**\n\n{res['control_text']}")
+                c2.warning(f"**Steered:**\n\n{res['steered_text']}")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Steering Error: {e}")
 
 # --- TAB 4: FEATURE DICTIONARY ---
 with tab4:
-    st.subheader("🧬 Feature Dictionary")
-    st.markdown(f"Inspecting SAE at **Layer {sae_layer}** (Change in Sidebar)")
+    st.subheader("🧬 Feature Dictionary & Search")
+    st.markdown(f"Inspecting SAE at **Layer {sae_layer}**")
 
-    dict_input = st.text_input(
-        "Text to analyze:",
-        "I went to Paris and London and wrote some Python code.",
-        key="dict_input",
-    )
-    top_k = st.slider("Top-K features", 5, 50, 20)
+    # --- SECTION A: AUTO-SEARCH ---
+    st.info("🤖 **Auto-Search:** Find the neuron that spikes for your concept.")
+    col_search_1, col_search_2 = st.columns([3, 1])
 
-    if st.button("Analyze Features"):
-        with st.spinner("Analyzing..."):
+    with col_search_1:
+        search_query = st.text_input("Concept to find:", "She is a woman and a girl.")
+    with col_search_2:
+        auto_top_k = st.slider("Candidates", 1, 20, 5)
+
+    if st.button("Auto-Detect Feature", use_container_width=True):
+        with st.spinner("Scanning neurons..."):
             try:
-                sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
-                top_feats = get_top_features_for_text(dict_input, model_name, int(sae_layer), sae, top_k=top_k)
-
-                if top_feats:
-                    df_feats = pd.DataFrame(top_feats)
-                    st.dataframe(df_feats.style.background_gradient(subset=["activation"], cmap="Blues"))
+                sae_search = load_sae(model_name, int(sae_layer), path=sae_path_global)
+                if sae_search:
+                    results = find_best_feature(search_query, model, sae_search, sae_layer, top_k=auto_top_k)
+                    if results:
+                        winner = results[0]
+                        st.session_state['feature_idx'] = winner["Feature ID"]
+                        st.session_state['feat_inspect'] = winner["Feature ID"]
+                        st.success(f"Best Match: Feature #{winner['Feature ID']}")
+                        st.dataframe(pd.DataFrame(results)[["Rank", "Feature ID", "Activation", "Ratio"]],
+                                     use_container_width=True)
+                    else:
+                        st.warning("No specific features found.")
                 else:
-                    st.warning("No active features found.")
+                    st.error("SAE not found.")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Search Error: {e}")
 
     st.markdown("---")
-    st.markdown("#### 🔍 Inspect Corpus")
 
-    c_col1, c_col2 = st.columns(2)
-    with c_col1:
-        feat_id_inspect = st.number_input("Feature ID", 0, value=0, key="feat_inspect")
-    with c_col2:
-        corpus_path_ui = st.text_input("Corpus Path", "data/sae_corpus.txt")
+    # --- SECTION B: MANUAL SEARCH (FIXED) ---
+    st.info("🔬 **Manual Analysis:** See all features active in this text.")
+    c_man1, c_man2 = st.columns([3, 1])
+    with c_man1:
+        dict_input = st.text_input("Text to analyze:", "The doctor called the nurse.")
+    with c_man2:
+        top_k = st.slider("Top-K", 5, 50, 10)
 
-    if st.button("Find Top Sentences"):
-        try:
-            # We assume sae is loaded or load it here
-            sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
-
-            # Simple check if file exists
-            if not os.path.exists(corpus_path_ui):
-                st.error("Corpus file not found! Create one in data/sae_corpus.txt")
+    if st.button("Analyze Features"):
+        sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+        if sae:
+            top_feats = get_top_features_for_text(dict_input, model_name, int(sae_layer), sae, top_k=top_k)
+            if top_feats:
+                # FIX: Do not hardcode column names (avoids KeyError)
+                df = pd.DataFrame(top_feats)
+                st.dataframe(df.style.background_gradient(cmap="Blues"), use_container_width=True)
             else:
-                with open(corpus_path_ui, "r") as f:
-                    lines = [l.strip() for l in f if l.strip()]
+                st.warning("No active features found.")
 
-                rows = []
-                # Quick scan of first 50 lines for demo
-                scan_limit = 50
-                for i, txt in enumerate(lines):
-                    if i >= scan_limit: break
-                    vec = get_feature_activations_for_text(txt, model_name, int(sae_layer), sae)
-                    if feat_id_inspect < vec.shape[0]:
-                        val = vec[feat_id_inspect].item()
-                        if val > 0.1:  # Only show non-zero
-                            rows.append({"text": txt, "activation": val})
+    st.markdown("---")
 
-                if rows:
-                    rows.sort(key=lambda x: x["activation"], reverse=True)
-                    st.table(rows[:10])
-                else:
-                    st.info("No activation found in the first 50 lines of corpus.")
+    # --- SECTION C: INSPECTOR & CORPUS SCANNER (FIXED) ---
+    st.subheader("🔍 Feature Inspector")
 
-        except Exception as e:
-            st.error(f"Error: {e}")
+    col_insp_1, col_insp_2 = st.columns([1, 2])
+
+    with col_insp_1:
+        # Input ID manually or take from Auto-Detect
+        f_id = st.number_input("Feature ID", min_value=0, value=st.session_state.get('feature_idx', 0),
+                               key="feat_inspect")
+
+        # GEMINI LABELER
+        # Check if key is already loaded from .env
+        env_key = os.getenv("GEMINI_API_KEY")
+
+        # If key exists in .env, pre-fill the box (masked) or hide it
+        if env_key:
+            st.success("✅ API Key loaded from .env")
+        else:
+            # Only show input if .env is missing
+            api_key_input = st.text_input("Gemini API Key", type="password")
+            if api_key_input:
+                os.environ["GEMINI_API_KEY"] = api_key_input
+        if st.button("✨ Auto-Label"):
+            sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+            if sae and os.getenv("GEMINI_API_KEY"):
+                from glassbox.auto_interp import generate_feature_label
+
+                label = generate_feature_label(f_id, sae, model, int(sae_layer), None)
+                st.success("Done!")
+                st.markdown(f"### {label}")
+            else:
+                st.error("Missing SAE or API Key.")
+
+    with col_insp_2:
+        # FIXED CORPUS SCANNER
+        st.markdown("#### 📖 Top Sentences from Corpus")
+
+        # 1. Create Dummy Corpus if missing
+        default_corpus = "data/sae_corpus.txt"
+        if not os.path.exists("data"): os.makedirs("data")
+
+        if not os.path.exists(default_corpus):
+            with open(default_corpus, "w") as f:
+                # Add diverse sentences so the scanner always finds something
+                f.write("The cat sat on the mat.\n")
+                f.write("She is a doctor and a mother.\n")
+                f.write("He is a construction worker.\n")
+                f.write("Python is a programming language.\n")
+                f.write("The Eiffel Tower is in Paris.\n")
+                f.write("I love you so much.\n")
+                f.write("I hate this situation.\n")
+                f.write("The integral of x squared is x cubed over three.\n")
+
+        corpus_path_ui = st.text_input("Corpus Path", default_corpus)
+        scan_limit = st.slider("Scan Limit (Lines)", 50, 1000, 200)
+
+        if st.button("Find Top Sentences"):
+            sae = load_sae(model_name, int(sae_layer), path=sae_path_global)
+            if sae and os.path.exists(corpus_path_ui):
+                with st.spinner(f"Scanning {scan_limit} lines..."):
+                    with open(corpus_path_ui, "r") as f:
+                        lines = [l.strip() for l in f if l.strip()]
+
+                    rows = []
+                    found_any = False
+                    for i, txt in enumerate(lines):
+                        if i >= scan_limit: break
+                        vec = get_feature_activations_for_text(txt, model_name, int(sae_layer), sae)
+                        if f_id < vec.shape[0]:
+                            val = vec[f_id].item()
+                            # FIX: LOWER THRESHOLD to 0.0001 (catches rare features)
+                            if val > 0.0001:
+                                rows.append({"Sentence": txt, "Activation": val})
+                                found_any = True
+
+                    if found_any:
+                        rows.sort(key=lambda x: x["Activation"], reverse=True)
+                        st.table(pd.DataFrame(rows[:10]))
+                    else:
+                        st.warning(
+                            "No activations found. Try increasing Scan Limit or analyzing a feature found in Manual Search first.")
