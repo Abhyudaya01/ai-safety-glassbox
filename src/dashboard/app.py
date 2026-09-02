@@ -18,7 +18,11 @@ from glassbox.model_loader import ModelWrapper
 
 # --- TRACERS ---
 from glassbox.tracers import get_attention_data, get_logit_lens_data
-from glassbox.steering import get_steering_vector, run_steering_eval
+try:
+    from glassbox.steering import get_steering_vector, run_steering_eval
+except ImportError:
+    from glassbox.steering import get_steering_vector
+    from glassbox.evaluate import run_steering_eval
 
 from glassbox.sae import (
     load_sae,
